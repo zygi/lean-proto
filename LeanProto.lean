@@ -8,6 +8,9 @@ import AssertCmd
 import LeanProtoNativeHelpers
 
 
+-- HACKHACKHACK until we have our own Default class. Currently Float's Inhabited returns UInt 1, not 0.
+instance : Inhabited Float := ⟨ 0.0 ⟩ 
+
 -- Lets us unwrap an option and throw an exception otherwise. There must be a fancy category theoretic name for this
 -- that I don't know. 
 namespace Option
@@ -24,15 +27,14 @@ namespace LeanProto
 
 -- I wanted to make this toUInt64/ofUInt64 but pattern matching on UInt64 seems to be broken
 class ProtoEnum (α: Type u) where
-  toNat : α -> Nat
-  ofNat : Nat -> Option α
+  toInt : α -> Int
+  ofInt : Int -> Option α
 
 class ProtoSerialize (α: Type u) where
   serialize : α -> ByteArray
 
 class ProtoDeserialize (α: Type u) where
-  deserialize : ByteArray -> Option α
-
+  deserialize : ByteArray -> Except IO.Error α
 namespace Utils
 
 def byteArrayToHex(b: ByteArray) : String := 
@@ -88,8 +90,17 @@ instance : Repr ByteArray where reprPrec n x := reprPrec (Utils.byteArrayToHex n
 
 namespace EncDec
 
+def UInt32Max : Nat := UInt32.size - 1
+def UInt64Max : Nat := UInt64.size - 1
+def Int32Max : Int := (Int.ofNat ((UInt32.size / 2))) - 1
+def Int32Min : Int := -1*(Int.ofNat ((UInt32.size / 2)))
+def Int64Max : Int := (Int.ofNat ((UInt64.size / 2))) - 1
+def Int64Min : Int := -1*(Int.ofNat ((UInt64.size / 2)))
+
 open Lean
 open Lean.Elab
+
+open Utils (hexToByteArray!)
 
 deriving instance BEq, Repr for Std.AssocList
 
@@ -148,9 +159,9 @@ structure ParseState where
 
 abbrev ProtoParseM := EStateM IO.Error ParseState
 
-def resultToOption (v: EStateM.Result ε ParseState α ) : Option α := match v with 
-| EStateM.Result.ok r _ => some r
-| EStateM.Result.error r _ => none
+def resultToExcept (v: EStateM.Result IO.Error ParseState α ) : Except IO.Error α := match v with 
+| EStateM.Result.ok r _ => Except.ok r
+| EStateM.Result.error r _ => Except.error r
 
 def mkOkResult (v: α) : EStateM.Result ε ParseState α := EStateM.Result.ok v (Inhabited.default : ParseState)
 
@@ -221,12 +232,15 @@ def encodeFixedUInt32 (d: ByteArray) (v: UInt32) : ByteArray := do
   let d := d.push (UInt32.toUInt8 (v.shiftRight (8*2)))
   d.push (UInt32.toUInt8 (v.shiftRight (8*3)))
 
+
 #assert (decode (encodeFixedUInt64 (ByteArray.mkEmpty 0) 5) decodeFixedUInt64) == (mkOkResult $ UInt64.ofNat 5) via SameEvalVal
 #assert (decode (encodeFixedUInt64 (ByteArray.mkEmpty 0) 0) decodeFixedUInt64) == (mkOkResult $ UInt64.ofNat 0) via SameEvalVal
 #assert (decode (encodeFixedUInt64 (ByteArray.mkEmpty 0) 5555555) decodeFixedUInt64) == (mkOkResult $ UInt64.ofNat 5555555) via SameEvalVal
 
-
-#assert (decode (encodeFixedUInt32 (ByteArray.mkEmpty 0) 5) decodeFixedUInt32) == (mkOkResult $ UInt32.ofNat 5) via SameEvalVal
+-- Verify endianness
+#assert (encodeFixedUInt32 (ByteArray.mkEmpty 0) 1) == (hexToByteArray! "01000000")
+#assert (encodeFixedUInt32 (ByteArray.mkEmpty 0) 12345678) == (hexToByteArray! "4E61BC00")
+#assert (decode (encodeFixedUInt32 (ByteArray.mkEmpty 0) 12345678) decodeFixedUInt32) == (mkOkResult $ UInt32.ofNat 12345678) via SameEvalVal
 #assert (decode (encodeFixedUInt32 (ByteArray.mkEmpty 0) 0) decodeFixedUInt32) == (mkOkResult $ UInt32.ofNat 0) via SameEvalVal
 #assert (decode (encodeFixedUInt32 (ByteArray.mkEmpty 0) 4294967295) decodeFixedUInt32) == (mkOkResult $ UInt32.ofNat 4294967295) via SameEvalVal
 
@@ -265,7 +279,7 @@ def decodeKey: ProtoParseM (WireType × Nat) := do
   -- make this faster via bit shift
   let wt := WireType.ofNat (Nat.mod i 8)
   match wt with
-  | none => throw $ IO.userError "Invalid wire type {wt}"
+  | none => throw $ IO.userError s!"Invalid wire type {i}"
   | some x => (x, i/8)
 
 #assert (decode (ByteArray.mk #[0x08]) decodeKey) == mkOkResult ((WireType.Varint, 1)) via SameEvalVal
@@ -278,33 +292,50 @@ def encodeKeyLit (d: ByteArray) (wt: Nat) (h: WireType.natIsValid wt = true) (id
 def allOnes64 : UInt64 := 0xffffffffffffffff
 def allOnes32 : UInt32 := 0xffffffff
 
+-- TODO Workaround for Int.negSucc bug
+def myNegSucc (i: Nat) : Int := 
+  let succ := Nat.succ i
+  let int := Int.ofNat succ
+  Int.neg int
+
+
 def UInt64.toInt2C (x: UInt64) : Int :=
   let pos := x.shiftRight 63 == 0
-  if pos then Int.ofNat $ x.toNat else Int.negSucc $ (x.xor allOnes64).toNat
+  if pos then Int.ofNat $ x.toNat else myNegSucc $ (x.xor allOnes64).toNat
 
 def UInt32.toInt2C (x: UInt32) : Int :=
   let pos := x.shiftRight 31 == 0
-  if pos then Int.ofNat $ x.toNat else Int.negSucc $ (x.xor allOnes32).toNat
+  if pos then Int.ofNat $ x.toNat else myNegSucc $ (x.xor allOnes32).toNat
 
-def Int.toUInt64 : Int -> UInt64
+
+def Int.toUInt642C : Int -> UInt64
 | Int.ofNat x => UInt64.ofNat x
 | Int.negSucc x => (UInt64.ofNat x).xor allOnes64
 
-def Int.toUInt32 : Int -> UInt32
+def Int.toUInt322C : Int -> UInt32
 | Int.ofNat x => UInt32.ofNat x
 | Int.negSucc x => (UInt32.ofNat x).xor allOnes32
 
-#assert (UInt64.toInt2C (Int.toUInt64 (Int.ofNat 555))) == (Int.ofNat 555)
-#assert (UInt64.toInt2C (Int.toUInt64 (Int.negSucc 555))) == (Int.negSucc 555)
+#assert (Int.toUInt322C (-1)) == UInt32.ofNat (UInt32.size - 1)
+#assert (Int.toUInt322C Int32Min) == UInt32.ofNat (2^31)
 
-#assert (UInt32.toInt2C (Int.toUInt32 (555:Int))) == (555:Int)
-#assert (UInt32.toInt2C (Int.toUInt32 (-555))) == (-555)
+#assert (Int.toUInt642C (-1)) == UInt64.ofNat (UInt64.size - 1)
+#assert (Int.toUInt642C Int64Min) == UInt64.ofNat (2^63)
+
+#assert (UInt64.toInt2C (Int.toUInt642C (0:Int))) == (0:Int)
+#assert (UInt64.toInt2C (Int.toUInt642C Int64Max)) == Int64Max
+#assert (UInt64.toInt2C (Int.toUInt642C (Int32Min))) == (Int32Min)
+#assert (UInt64.toInt2C (Int.toUInt642C (Int64Min))) == (Int64Min)
+
+#assert (UInt32.toInt2C (Int.toUInt322C (555:Int))) == (555:Int)
+#assert (UInt32.toInt2C (Int.toUInt322C (-555))) == (-555)
+#assert (UInt32.toInt2C (Int.toUInt322C Int32Min)) == Int32Min
 
 def decodeInt32AsInt: ProtoParseM Int := do UInt32.toInt2C (<- decodeVarInt).toUInt32
 def decodeInt64AsInt: ProtoParseM Int := do UInt64.toInt2C (<- decodeVarInt)
 
-def encodeIntAsInt32 (d: ByteArray) (v: Int) : ByteArray := encodeVarInt d $ UInt32.toUInt64 $ Int.toUInt32 v
-def encodeIntAsInt64 (d: ByteArray) (v: Int) : ByteArray := encodeVarInt d $ Int.toUInt64 v
+def encodeIntAsInt32 (d: ByteArray) (v: Int) : ByteArray := encodeVarInt d $ UInt32.toUInt64 $ Int.toUInt322C v
+def encodeIntAsInt64 (d: ByteArray) (v: Int) : ByteArray := encodeVarInt d $ Int.toUInt642C v
 
 #assert (decode (encodeIntAsInt32 (ByteArray.mkEmpty 0) 5) decodeInt32AsInt) == (mkOkResult (5:Int)) via SameEvalVal
 #assert (decode (encodeIntAsInt32 (ByteArray.mkEmpty 0) 0) decodeInt32AsInt) == (mkOkResult (0:Int)) via SameEvalVal
@@ -313,12 +344,13 @@ def encodeIntAsInt64 (d: ByteArray) (v: Int) : ByteArray := encodeVarInt d $ Int
 #assert (decode (encodeIntAsInt64 (ByteArray.mkEmpty 0) 5) decodeInt64AsInt) == (mkOkResult (5:Int)) via SameEvalVal
 #assert (decode (encodeIntAsInt64 (ByteArray.mkEmpty 0) 0) decodeInt64AsInt) == (mkOkResult (0:Int)) via SameEvalVal
 #assert (decode (encodeIntAsInt64 (ByteArray.mkEmpty 0) (-15555)) decodeInt64AsInt) == (mkOkResult (-15555)) via SameEvalVal
+#assert (decode (encodeIntAsInt64 (ByteArray.mkEmpty 0) Int64Min) decodeInt64AsInt) == (mkOkResult Int64Min) via SameEvalVal
 
 def decodeUInt32AsNat: ProtoParseM Nat := do (← decodeVarInt).toNat 
 def decodeUInt64AsNat: ProtoParseM Nat := do (← decodeVarInt).toNat 
 
 def encodeNatAsUInt32 (d: ByteArray) (v: Nat) : ByteArray := encodeVarInt d $ UInt32.toUInt64 $ v.toUInt32
-def encodeNatAsUInt64 (d: ByteArray) (v: Nat) : ByteArray := encodeVarInt d $ Int.toUInt64 v
+def encodeNatAsUInt64 (d: ByteArray) (v: Nat) : ByteArray := encodeVarInt d $ Int.toUInt642C v
 
 #assert (decode (encodeNatAsUInt32 (ByteArray.mkEmpty 0) 5) decodeUInt32AsNat) == (mkOkResult 5) via SameEvalVal
 #assert (decode (encodeNatAsUInt32 (ByteArray.mkEmpty 0) 0) decodeUInt32AsNat) == (mkOkResult 0) via SameEvalVal
@@ -333,8 +365,8 @@ def encodeNatAsUInt64 (d: ByteArray) (v: Nat) : ByteArray := encodeVarInt d $ In
 def decodeFixedInt32AsInt: ProtoParseM Int := do UInt32.toInt2C (<- decodeFixedUInt32)
 def decodeFixedInt64AsInt: ProtoParseM Int := do UInt64.toInt2C (<- decodeFixedUInt64)
 
-def encodeIntAsFixedInt32 (d: ByteArray) (v: Int) : ByteArray := encodeFixedUInt32 d $ Int.toUInt32 v
-def encodeIntAsFixedInt64 (d: ByteArray) (v: Int) : ByteArray := encodeFixedUInt64 d $ Int.toUInt64 v
+def encodeIntAsFixedInt32 (d: ByteArray) (v: Int) : ByteArray := encodeFixedUInt32 d $ Int.toUInt322C v
+def encodeIntAsFixedInt64 (d: ByteArray) (v: Int) : ByteArray := encodeFixedUInt64 d $ Int.toUInt642C v
 
 #assert (decode (encodeIntAsFixedInt32 (ByteArray.mkEmpty 0) 5) decodeFixedInt32AsInt) == (mkOkResult (5:Int)) via SameEvalVal
 #assert (decode (encodeIntAsFixedInt32 (ByteArray.mkEmpty 0) 0) decodeFixedInt32AsInt) == (mkOkResult (0:Int)) via SameEvalVal
@@ -344,6 +376,81 @@ def encodeIntAsFixedInt64 (d: ByteArray) (v: Int) : ByteArray := encodeFixedUInt
 #assert (decode (encodeIntAsFixedInt64 (ByteArray.mkEmpty 0) 0) decodeFixedInt64AsInt) == (mkOkResult (0:Int)) via SameEvalVal
 #assert (decode (encodeIntAsFixedInt64 (ByteArray.mkEmpty 0) (-15555)) decodeFixedInt64AsInt) == (mkOkResult (-15555)) via SameEvalVal
 
+-- sint{32,64}
+
+def fixedDecodeSInt32(x: UInt32) : Int := UInt32.toInt2C ((x.shiftRight 1).xor (0 - (x.land 1)))
+def fixedDecodeSInt64(x: UInt64) : Int := UInt64.toInt2C ((x.shiftRight 1).xor (0 - (x.land 1)))
+
+def fixedEncodeIntToSInt32(v: Int) : UInt32 := 
+  let x := Int.toUInt322C v
+  ((x.shiftLeft 1).xor (x.arithShiftRight 31))
+
+def fixedEncodeIntToSInt64(v: Int) : UInt64 :=
+  let x := Int.toUInt642C v
+  ((x.shiftLeft 1).xor (x.arithShiftRight 63))
+
+
+#assert (fixedDecodeSInt32 $ fixedEncodeIntToSInt32 (0:Int)) == (0:Int)
+#assert (fixedDecodeSInt32 $ fixedEncodeIntToSInt32 Int32Max) == Int32Max
+#assert (fixedDecodeSInt32 $ fixedEncodeIntToSInt32 Int32Min) == Int32Min
+#assert (fixedDecodeSInt64 $ fixedEncodeIntToSInt64 Int64Max) == Int64Max
+#assert (fixedDecodeSInt64 $ fixedEncodeIntToSInt64 (Int64Min / 2)) == (Int64Min / 2)
+#assert (fixedDecodeSInt64 $ fixedEncodeIntToSInt64 Int64Min) == Int64Min
+
+
+def decodeSInt32: ProtoParseM Int := do return fixedDecodeSInt32 (<- decodeVarInt).toUInt32
+def decodeSInt64: ProtoParseM Int := do 
+  let num ← decodeVarInt
+  pure $ fixedDecodeSInt64 num
+
+def encodeIntAsSInt32 (d: ByteArray) (v: Int) : ByteArray := 
+  encodeVarInt d $ UInt32.toUInt64 $ fixedEncodeIntToSInt32 v
+def encodeIntAsSInt64 (d: ByteArray) (v: Int) : ByteArray := 
+  encodeVarInt d $ fixedEncodeIntToSInt64 v
+
+#eval Int32Min
+
+-- Something weird is happening with this: the following works
+def asdf := decode (encodeIntAsSInt64 (ByteArray.mkEmpty 0) Int64Min) decodeVarInt
+#eval asdf -- EStateM.Result.ok 18446744073709551615
+#eval fixedDecodeSInt64 18446744073709551615
+
+-- but this doesn't
+-- #eval decode (encodeIntAsSInt64 (ByteArray.mkEmpty 0) Int64Min) fixedDecodeSInt64
+
+#assert (decode (encodeIntAsSInt32 (ByteArray.mkEmpty 0) Int32Max) decodeSInt32)
+  == (mkOkResult Int32Max) via SameEvalVal
+#assert (decode (encodeIntAsSInt32 (ByteArray.mkEmpty 0) Int32Min) decodeSInt32)
+  == (mkOkResult Int32Min) via SameEvalVal
+#assert (decode (encodeIntAsSInt64 (ByteArray.mkEmpty 0) Int64Max) decodeSInt64)
+  == (mkOkResult Int64Max) via SameEvalVal
+#assert (decode (encodeIntAsSInt64 (ByteArray.mkEmpty 0) (-5)) decodeSInt64)
+  == (mkOkResult (-5)) via SameEvalVal
+#assert (decode (encodeIntAsSInt64 (ByteArray.mkEmpty 0) Int64Min) decodeSInt64)
+  == (mkOkResult Int64Min) via SameEvalVal
+
+-- sfixed{32,64}
+
+def decodeSFixed32: ProtoParseM Int := do return fixedDecodeSInt32 $ (← decodeFixedUInt32)
+def decodeSFixed64: ProtoParseM Int := do return fixedDecodeSInt64 $ (← decodeFixedUInt64)
+
+def encodeIntAsSFixed32 (d: ByteArray) (v: Int) : ByteArray := 
+  encodeFixedUInt32 d $ fixedEncodeIntToSInt32 v
+
+def encodeIntAsSFixed64 (d: ByteArray) (v: Int) : ByteArray := 
+  encodeFixedUInt64 d $ fixedEncodeIntToSInt64 v
+
+#assert (decode (encodeIntAsSFixed32 (ByteArray.mkEmpty 0) Int32Max) decodeSFixed32)
+  == (mkOkResult Int32Max) via SameEvalVal
+#assert (decode (encodeIntAsSFixed32 (ByteArray.mkEmpty 0) Int32Min) decodeSFixed32)
+  == (mkOkResult Int32Min) via SameEvalVal
+#assert (decode (encodeIntAsSFixed64 (ByteArray.mkEmpty 0) Int64Max) decodeSFixed64)
+  == (mkOkResult Int64Max) via SameEvalVal
+#assert (decode (encodeIntAsSFixed64 (ByteArray.mkEmpty 0) (-5)) decodeSFixed64)
+  == (mkOkResult (-5)) via SameEvalVal
+#assert (decode (encodeIntAsSFixed64 (ByteArray.mkEmpty 0) Int64Min) decodeSFixed64)
+  == (mkOkResult Int64Min) via SameEvalVal
+
 -- Bools
 def decodeBool : ProtoParseM Bool := do (<- decodeVarInt) != 0
 def encodeBool (d: ByteArray) (v: Bool) : ByteArray := encodeVarInt d v.toUInt64
@@ -352,7 +459,7 @@ def encodeBool (d: ByteArray) (v: Bool) : ByteArray := encodeVarInt d v.toUInt64
 #assert (decode (encodeBool (ByteArray.mkEmpty 0) false) decodeBool) == (mkOkResult false) via SameEvalVal
 
 -- Floats
--- These four are not at all unsafe
+-- These four are not at all unsafe, why do you ask?
 def decodeFloat64AsFloat: ProtoParseM Float := do
   let uint64 ← decodeFixedUInt64
   Float.ofUInt64Transmute uint64
@@ -364,11 +471,14 @@ def decodeFloat32AsFloat: ProtoParseM Float := do
 def encodeFloatAsFloat64 (d: ByteArray) (v: Float) : ByteArray := encodeFixedUInt64 d $ v.toUInt64Transmute
 def encodeFloatAsFloat32 (d: ByteArray) (v: Float) : ByteArray := encodeFixedUInt32 d $ v.toUInt32Transmute
 
-#assert (decode (ByteArray.mk #[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x14, 0x40]) decodeFloat64AsFloat) == (mkOkResult 5.0) via SameEvalVal
+#assert (decode (hexToByteArray! "0000000000001440") decodeFloat64AsFloat) == (mkOkResult 5.0) via SameEvalVal
+#assert (decode (hexToByteArray! "000000008061CEC0") decodeFloat64AsFloat) == (mkOkResult (-15555.0)) via SameEvalVal
 #assert (decode (encodeFloatAsFloat64 (ByteArray.mkEmpty 0) 5.0) decodeFloat64AsFloat) == (mkOkResult 5.0) via SameEvalVal
 #assert (decode (encodeFloatAsFloat64 (ByteArray.mkEmpty 0) 0.0) decodeFloat64AsFloat) == (mkOkResult 0.0) via SameEvalVal
 #assert (decode (encodeFloatAsFloat64 (ByteArray.mkEmpty 0) (-15555.0)) decodeFloat64AsFloat) == (mkOkResult (-15555.0)) via SameEvalVal
 
+#assert (decode (hexToByteArray! "0000A040") decodeFloat32AsFloat) == (mkOkResult 5.0) via SameEvalVal
+#assert (decode (hexToByteArray! "000C73C6") decodeFloat32AsFloat) == (mkOkResult (-15555.0)) via SameEvalVal
 #assert (decode (encodeFloatAsFloat32 (ByteArray.mkEmpty 0) 5.0) decodeFloat32AsFloat) == (mkOkResult 5.0) via SameEvalVal
 #assert (decode (encodeFloatAsFloat32 (ByteArray.mkEmpty 0) 0.0) decodeFloat32AsFloat) == (mkOkResult 0.0) via SameEvalVal
 #assert (decode (encodeFloatAsFloat32 (ByteArray.mkEmpty 0) (-15555.0)) decodeFloat32AsFloat) == (mkOkResult (-15555.0)) via SameEvalVal
@@ -381,8 +491,9 @@ def decodeString : ProtoParseM String := do
   String.fromUTF8Unchecked bytes
 
 def encodeString (d: ByteArray) (s: String) :=
-  let d := encodeVarInt d s.length.toUInt64
-  d.append s.toUTF8
+  let s := s.toUTF8
+  let d := encodeVarInt d s.size.toUInt64
+  d.append s
 
 #assert (decode (encodeString (ByteArray.mkEmpty 0) "") decodeString) == (mkOkResult "") via SameEvalVal
 #assert (decode (encodeString (ByteArray.mkEmpty 0) "transsubstantiation") decodeString) == (mkOkResult "transsubstantiation") via SameEvalVal
@@ -403,9 +514,13 @@ def encodeByteArray (d: ByteArray) (s: ByteArray) :=
 
 -- Enums
 def decodeEnum [ProtoEnum α] : ProtoParseM $ α := do
-  let opt := ProtoEnum.ofNat (← decodeVarInt).toNat
-  opt.unwrap
-def encodeEnum [ProtoEnum α] (d: ByteArray) (s: α) := encodeVarInt d $ UInt64.ofNat $ ProtoEnum.toNat s
+  let numVal ← decodeInt32AsInt
+  try
+    (ProtoEnum.ofInt numVal).unwrap
+  catch e =>
+    throw $ IO.userError s!"Invalid proto value received: {numVal}"
+
+def encodeEnum [ProtoEnum α] (d: ByteArray) (s: α) := encodeIntAsInt32 d $ ProtoEnum.toInt s
 
 -- PackedArrays
 
@@ -440,33 +555,45 @@ def decodeKeyAndMixedArray (decodeElem: ProtoParseM α) (wt: WireType) (soFar: A
     return soFar.append (← decodePackedArray decodeElem)
   soFar.push (← decodeElem)
 
+
+def decodeKeyAndNonPackedArray (decodeElem: ProtoParseM α) (wt: WireType) (soFar: Array α): ProtoParseM $ Array α := do
+  soFar.push (← decodeElem)
+
+
 -- Messages
-def decodeMessage [ProtoDeserialize α] : ProtoParseM $ α := do
+def decodeMessage (rawDecodeFn: ProtoParseM α) : ProtoParseM $ α := do
   let len ← decodeVarInt
   let data ← copyBytes len.toNat
   -- todo we don't have to copy here--replace with array view when that becomes easy
-  let proto := ProtoDeserialize.deserialize (α := α) data
-  proto.unwrap
+  match (decode data rawDecodeFn) with 
+  | EStateM.Result.ok val _ => val
+  | EStateM.Result.error r _ => throw r 
 
-def encodeMessage [ProtoSerialize α] (d: ByteArray) (s: α) : ByteArray := do
-  let acc := ProtoSerialize.serialize (α := α) s
+def encodeMessage (encodeFn: ByteArray -> α -> ByteArray) (d: ByteArray) (s: α) : ByteArray := do
+  let acc := encodeFn (ByteArray.mkEmpty 0) $ s
   (encodeVarInt d acc.size.toUInt64).append acc
 
 -- Maps
-def decodeMapEntry (decodeMapKey: ProtoParseM α) (decodeMapVal: ProtoParseM β): ProtoParseM $ (α × β) := do
+
+partial def decodeMapEntryAux [Inhabited α] [Inhabited β] (decodeMapKey: ProtoParseM α) 
+  (decodeMapVal: ProtoParseM β) (x: Option α) (y: Option β) : ProtoParseM $ (Option α × Option β) := do
+  if (← done) then return (x, y)
+  let (_, idx) ← decodeKey
+  if idx == 1 then
+    let keyVal ← decodeMapKey
+    decodeMapEntryAux decodeMapKey decodeMapVal (some keyVal) y
+  else if idx == 2 then
+    let valVal ← decodeMapVal
+    decodeMapEntryAux decodeMapKey decodeMapVal x (some valVal)
+  else
+    decodeMapEntryAux decodeMapKey decodeMapVal x y
+
+def decodeMapEntry [Inhabited α] [Inhabited β] (decodeMapKey: ProtoParseM α) (decodeMapVal: ProtoParseM β): ProtoParseM $ (α × β) := do
   let len ← decodeVarInt
-  let starting := (← get).i
-  let (_, idx1) ← decodeKey
-  if idx1 == 1 then do
-    let mapKey ← decodeMapKey
-    let (_, idx2) ← decodeKey
-    if idx2 != 2 then throw $ IO.userError "Unexpected entry index in map entry"
-    return (mapKey, (← decodeMapVal))
-  if idx1 != 2 then throw $ IO.userError "Unexpected entry index in map entry"
-  let mapVal ← decodeMapVal
-  let (_, idx2) ← decodeKey
-  if idx2 != 1 then throw $ IO.userError "Unexpected entry index in map entry"
-  return ((← decodeMapKey), mapVal) 
+  let data ← copyBytes len.toNat
+  match (decode data (decodeMapEntryAux decodeMapKey decodeMapVal none none)) with
+  | EStateM.Result.ok (f, s) _ => (f.getD arbitrary, s.getD arbitrary)
+  | EStateM.Result.error r _ => throw r
 
 def encodeMapWithTag (encodeMapKey: ByteArray -> α -> ByteArray) (encodeMapVal: ByteArray -> β -> ByteArray)
   (wtKey: Nat) (h1: WireType.natIsValid wtKey = true) (wtVal: Nat) (h2: WireType.natIsValid wtVal = true) (number: Nat) (d: ByteArray)
@@ -487,17 +614,23 @@ def encodeMapWithTag (encodeMapKey: ByteArray -> α -> ByteArray) (encodeMapVal:
     res := res.append acc
   return res
 
-def encodeWithTag (fn: ByteArray -> α -> ByteArray) (wireType: Nat)
-  (h: WireType.natIsValid wireType = true) (number: Nat) (d: ByteArray) (val: α) : ByteArray :=
+def encodeWithTag [Inhabited α] [BEq α] (fn: ByteArray -> α -> ByteArray) (wireType: Nat)
+  (h: WireType.natIsValid wireType = true) (number: Nat) (d: ByteArray) (val: α) : ByteArray := do
   fn (encodeKey d (WireType.ofLit wireType h) number) val
 
--- TODO fix unwrap
-def encodeIfNotNoneWithTag (fn: ByteArray -> α -> ByteArray) (wireType: Nat)
-  (h: WireType.natIsValid wireType = true) (number: Nat) (d: ByteArray) : Option α -> ByteArray
-| none => d
-| some a => encodeWithTag fn wireType h number d a
+def encodeOpt [Inhabited α] (encodeFn: ByteArray -> α -> ByteArray) (b: ByteArray) (val: Option α) : ByteArray := 
+  -- encodeFn b $ val.getD arbitrary
+  match val with | none => b | some x => encodeFn b x
 
-def encodeUnpackedArrayWithTag (fn: ByteArray -> α -> ByteArray) (wireType: Nat)
+def encodeOptDef [Inhabited α] (encodeFn: ByteArray -> α -> ByteArray) (b: ByteArray) (val: Option α) : ByteArray := 
+  -- encodeFn b $ val.getD arbitrary
+  match val with | none => encodeFn b arbitrary | some x => encodeFn b x
+  
+def encodeIfNonempty [Inhabited α] (encodeFn: ByteArray -> Array α -> ByteArray) (b: ByteArray) (val: Array α) : ByteArray := 
+  -- encodeFn b $ val.getD arbitrary
+  match val.size with | 0 => b | _ => encodeFn b val
+
+def encodeUnpackedArrayWithTag [Inhabited α] [BEq α] (fn: ByteArray -> α -> ByteArray) (wireType: Nat)
   (h: WireType.natIsValid wireType = true) (number: Nat) (d: ByteArray) (vals: Array α) : ByteArray := do
   let mut res := d
   for val in vals do
@@ -506,6 +639,7 @@ def encodeUnpackedArrayWithTag (fn: ByteArray -> α -> ByteArray) (wireType: Nat
 
 def someM (f: ProtoParseM α) : ProtoParseM $ Option α := do return some (← f)
 
+def withIgnoredState (x: ProtoParseM α) (z: α) : ProtoParseM α := x 
 -- def encodeMapWithTag (encodeMapKey: ByteArray -> α -> ByteArray) (encodeMapVal: ByteArray -> β -> ByteArray)
 --   (d: ByteArray) (wtKey: Nat) (h1: WireType.natIsValid wtKey = true) (wtVal: Nat) (h2: WireType.natIsValid wtVal = true) 
 --   (map: AssocList α β) : ByteArray := do
@@ -517,5 +651,3 @@ def someM (f: ProtoParseM α) : ProtoParseM $ Option α := do return some (← f
 end EncDec
 
 end LeanProto
-
-def main(x: List String): IO UInt32 := do return 0
