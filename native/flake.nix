@@ -4,13 +4,10 @@
   inputs.nixpkgs.url = github:NixOS/nixpkgs/nixpkgs-unstable;
   inputs.nix.url = github:NixOS/nix;
 
-  inputs.leanrulewrapper.url = "path:../lean-nix-helpers/leanRuleWrapper.nix";
-  inputs.leanrulewrapper.flake = false;
-
-  inputs.lean.url = "path:../lean4";
+  inputs.lean.url = "github:leanprover/lean4";
   inputs.flake-utils.url = github:numtide/flake-utils;
 
-  outputs = { self, lean, flake-utils, nixpkgs, leanrulewrapper, nix}: flake-utils.lib.eachDefaultSystem (system:
+  outputs = { self, lean, flake-utils, nixpkgs, nix}: flake-utils.lib.eachDefaultSystem (system:
     let
       cPkg = with import nixpkgs { inherit system; };
         stdenv.mkDerivation rec {
@@ -33,7 +30,7 @@
     in {
       packages = pkg // {
         inherit (leanPkgs) lean;
-      } // ((import leanrulewrapper) { inherit pkg system nixpkgs nix; });
+      };
 
       defaultPackage = pkg.modRoot;
     });
