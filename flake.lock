@@ -76,13 +76,17 @@
         "temci": "temci"
       },
       "locked": {
-        "narHash": "sha256-gdlxNl7Yk+JZD4bxjUK4c3dQnb/zg943xJ0/jVrn6z0=",
-        "path": "../lean4",
-        "type": "path"
+        "lastModified": 1616755184,
+        "narHash": "sha256-7ozyAMHW3OKtdzOmtR6pu/huSg3LJu9/t+kiTUHrXUM=",
+        "owner": "leanprover",
+        "repo": "lean4",
+        "rev": "2647cdf813147e45142a35cddf969cab9b1d764e",
+        "type": "github"
       },
       "original": {
-        "path": "../lean4",
-        "type": "path"
+        "owner": "leanprover",
+        "repo": "lean4",
+        "type": "github"
       }
     },
     "lean-stage0": {
@@ -98,18 +102,6 @@
         "owner": "leanprover",
         "repo": "lean4",
         "type": "github"
-      }
-    },
-    "leanShell": {
-      "flake": false,
-      "locked": {
-        "narHash": "sha256-1l8T7kDLFgW/4VDzh0IDPW2xCtCjwIpAPqadp4XN4Fg=",
-        "path": "../lean-nix-helpers/leanShell.nix",
-        "type": "path"
-      },
-      "original": {
-        "path": "../lean-nix-helpers/leanShell.nix",
-        "type": "path"
       }
     },
     "lowdown-src": {
@@ -215,7 +207,6 @@
         "assrt-command": "assrt-command",
         "flake-utils": "flake-utils_2",
         "lean": "lean",
-        "leanShell": "leanShell",
         "nixpkgs": "nixpkgs_3"
       }
     },
