@@ -17,16 +17,16 @@ def byteArrayToHex(b: ByteArray) : String :=
 @[inline]
 def hexChar (c: Char): Option Nat := do
   if '0' ≤ c ∧ c ≤ '9' then
-    some $ c.val.toNat - '0'.val.toNat
+    return some $ c.val.toNat - '0'.val.toNat
   else if 'a' ≤ c ∧ c ≤ 'f' then
-    some $ c.val.toNat - 'a'.val.toNat + 10
+    return some $ c.val.toNat - 'a'.val.toNat + 10
   else if 'A' ≤ c ∧ c ≤ 'F' then
-    some $ c.val.toNat - 'A'.val.toNat + 10
+    return some $ c.val.toNat - 'A'.val.toNat + 10
   else
     none
 
 def hexToByteArray(s: String): Option ByteArray := do
-  if s.length % 2 != 0 then none
+  if s.length % 2 != 0 then return none
   let mut res := ByteArray.mkEmpty $ s.length / 2
   for i in [:((s.length)/2)] do
     let v1 := hexChar (s[2*i])
@@ -37,7 +37,7 @@ def hexToByteArray(s: String): Option ByteArray := do
   return res
 
 def hexToByteArray!(s: String): ByteArray := do
-  if s.length % 2 != 0 then none
+  if s.length % 2 != 0 then return arbitrary
   let mut res := ByteArray.mkEmpty $ s.length / 2
   for i in [:((s.length)/2)] do
     let v1 := match hexChar (s[2*i]) with | Option.none => panic! "Bad hex" | Option.some x => x
